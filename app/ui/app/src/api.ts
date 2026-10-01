@@ -622,3 +622,23 @@ export async function getCloudStatus(): Promise<CloudStatusResponse | null> {
     source: (data.source as CloudStatusSource) || "none",
   };
 }
+
+/** Models currently loaded in memory (from GET /api/ps). */
+export async function listRunningModels(): Promise<ModelResponse[]> {
+  const response = await ollama.ps();
+  return response.models ?? [];
+}
+
+/**
+ * Unload a model from memory (same as `ollama stop <name>` /
+ * POST /api/generate with keep_alive=0 and an empty prompt).
+ */
+export async function unloadModel(model: string): Promise<void> {
+  await ollama.generate({
+    model,
+    prompt: "",
+    keep_alive: 0,
+    stream: false,
+  });
+}
+

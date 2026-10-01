@@ -315,6 +315,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/me", ollamaProxy)
 	mux.Handle("POST /api/signout", ollamaProxy)
 	mux.Handle("GET /api/experimental/model-recommendations", ollamaProxy)
+	// Used by the chat model picker Unload control (same as `ollama stop`)
+	mux.Handle("POST /api/generate", ollamaProxy)
+	mux.Handle("GET /api/ps", ollamaProxy)
 
 	// React app - catch all non-API routes and serve the React app
 	mux.Handle("GET /", s.appHandler())

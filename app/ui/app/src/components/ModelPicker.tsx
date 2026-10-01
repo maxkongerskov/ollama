@@ -5,15 +5,20 @@ import {
   forwardRef,
   type JSX,
   useImperativeHandle,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { Model } from "@/gotypes";
 import { useSelectedModel } from "@/hooks/useSelectedModel";
 import { useCloudStatus } from "@/hooks/useCloudStatus";
 import { useQueryClient } from "@tanstack/react-query";
-import { getModelUpstreamInfo } from "@/api";
+import { getModelUpstreamInfo, listRunningModels, unloadModel } from "@/api";
 import { ArrowDownTrayIcon } from "@heroicons/react/24/outline";
 
 const stalenessCheckCache = new Map<string, number>();
+
+function modelKey(name: string | undefined | null): string {
+  return (name || "").trim();
+}
 
 export const ModelPicker = forwardRef<
   HTMLButtonElement,
@@ -30,6 +35,9 @@ export const ModelPicker = forwardRef<
 ): JSX.Element {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [loadedModels, setLoadedModels] = useState<Set<string>>(new Set());
+  const [unloadingModel, setUnloadingModel] = useState<string | null>(null);
+  const [unloadError, setUnloadError] = useState<string | null>(null);
   const { selectedModel, setSettings, models, loading } = useSelectedModel(
     chatId,
     searchQuery,
@@ -42,6 +50,49 @@ export const ModelPicker = forwardRef<
     scrollToSelectedModel: () => void;
     scrollToTop: () => void;
   }>(null);
+
+  const refreshLoadedModels = async () => {
+    try {
+      const running = await listRunningModels();
+      const next = new Set<string>();
+      for (const m of running) {
+        const key = modelKey(m.model || m.name);
+        if (key) next.add(key);
+      }
+      setLoadedModels(next);
+      setUnloadError(null);
+    } catch (error) {
+      console.error("Failed to list running models:", error);
+    }
+  };
+
+  const handleUnload = async (modelName: string, event?: ReactMouseEvent) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    const name = modelKey(modelName);
+    if (!name || unloadingModel) return;
+    if (name.endsWith("cloud")) return;
+
+    setUnloadingModel(name);
+    setUnloadError(null);
+    try {
+      await unloadModel(name);
+      setLoadedModels((prev) => {
+        const next = new Set(prev);
+        next.delete(name);
+        return next;
+      });
+      // Re-fetch in case another process still holds the model
+      await refreshLoadedModels();
+    } catch (error) {
+      console.error("Failed to unload model:", error);
+      setUnloadError(
+        error instanceof Error ? error.message : "Failed to unload model",
+      );
+    } finally {
+      setUnloadingModel(null);
+    }
+  };
 
   const checkModelStaleness = async (model: Model) => {
     if (
@@ -75,7 +126,7 @@ export const ModelPicker = forwardRef<
   };
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: globalThis.MouseEvent) => {
       if (
         dropdownRef.current &&
         !dropdownRef.current.contains(event.target as Node)
@@ -99,8 +150,10 @@ export const ModelPicker = forwardRef<
     if (isOpen) {
       searchInputRef.current?.focus();
       modelListRef.current?.scrollToSelectedModel();
+      void refreshLoadedModels();
     } else {
       setSearchQuery("");
+      setUnloadError(null);
     }
   }, [isOpen]);
 
@@ -138,6 +191,12 @@ export const ModelPicker = forwardRef<
     setIsOpen(false);
     onModelSelect?.();
   };
+
+  const selectedKey = modelKey(selectedModel?.model);
+  const selectedIsLoaded =
+    !!selectedKey &&
+    loadedModels.has(selectedKey) &&
+    !selectedKey.endsWith("cloud");
 
   return (
     <div className="relative" ref={dropdownRef}>
@@ -184,7 +243,7 @@ export const ModelPicker = forwardRef<
         </svg>
       </button>
       {isOpen && (
-        <div className="absolute right-0 text-[15px] bottom-full mb-2 z-50 w-64 rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 backdrop-blur-lg dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white dark:ring-black/20">
+        <div className="absolute right-0 text-[15px] bottom-full mb-2 z-50 w-72 rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 backdrop-blur-lg dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white dark:ring-black/20">
           <div className="px-1 py-2 border-b border-neutral-100 dark:border-neutral-700">
             <input
               ref={searchInputRef}
@@ -197,6 +256,34 @@ export const ModelPicker = forwardRef<
             />
           </div>
 
+          {selectedIsLoaded && (
+            <div className="flex items-center gap-2 px-3 py-2 border-b border-neutral-100 dark:border-neutral-700 bg-neutral-50/80 dark:bg-neutral-900/40">
+              <div className="flex-1 min-w-0">
+                <div className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                  Loaded
+                </div>
+                <div className="truncate text-sm" title={selectedKey}>
+                  {selectedKey}
+                </div>
+              </div>
+              <button
+                type="button"
+                title={`Unload ${selectedKey} (ollama stop)`}
+                onClick={(e) => handleUnload(selectedKey, e)}
+                disabled={unloadingModel === selectedKey}
+                className="shrink-0 rounded-full px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40 disabled:opacity-50 cursor-pointer"
+              >
+                {unloadingModel === selectedKey ? "Unloading…" : "Unload"}
+              </button>
+            </div>
+          )}
+
+          {unloadError && (
+            <div className="px-3 py-2 text-xs text-red-600 dark:text-red-400 border-b border-neutral-100 dark:border-neutral-700">
+              {unloadError}
+            </div>
+          )}
+
           <ModelList
             ref={modelListRef}
             models={models}
@@ -204,6 +291,9 @@ export const ModelPicker = forwardRef<
             onModelSelect={handleModelSelect}
             cloudDisabled={cloudDisabled}
             isOpen={isOpen}
+            loadedModels={loadedModels}
+            unloadingModel={unloadingModel}
+            onUnload={handleUnload}
           />
         </div>
       )}
@@ -218,12 +308,18 @@ export const ModelList = forwardRef(function ModelList(
     onModelSelect,
     cloudDisabled,
     isOpen,
+    loadedModels,
+    unloadingModel,
+    onUnload,
   }: {
     models: Model[];
     selectedModel: Model | null;
     onModelSelect: (model: Model) => void;
     cloudDisabled: boolean;
     isOpen: boolean;
+    loadedModels: Set<string>;
+    unloadingModel: string | null;
+    onUnload: (modelName: string, event: ReactMouseEvent) => void;
   },
   ref,
 ): JSX.Element {
@@ -305,6 +401,9 @@ export const ModelList = forwardRef(function ModelList(
         </div>
       ) : (
         models.map((model, index) => {
+          const key = modelKey(model.model);
+          const isLoaded = loadedModels.has(key) && !key.endsWith("cloud");
+          const isUnloading = unloadingModel === key;
           return (
             <div key={`${model.model}-${model.digest || "no-digest"}-${index}`}>
               <button
@@ -320,6 +419,24 @@ export const ModelList = forwardRef(function ModelList(
                 <span className="flex-1 text-left truncate min-w-0">
                   {model.model}
                 </span>
+                {isLoaded && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    title={`Unload ${model.model} (ollama stop)`}
+                    onClick={(e) => onUnload(model.model, e)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onUnload(model.model, e as unknown as ReactMouseEvent);
+                      }
+                    }}
+                    className="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+                  >
+                    {isUnloading ? "…" : "Unload"}
+                  </span>
+                )}
                 {model.isCloud() && (
                   <svg
                     className="h-3 fill-current text-neutral-500 dark:text-neutral-400"
