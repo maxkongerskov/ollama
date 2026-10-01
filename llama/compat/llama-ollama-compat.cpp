@@ -1541,6 +1541,36 @@ void handle_gptoss(const llama_model_loader * ml, gguf_context * meta,
                               ".post_attention_norm");
 }
 
+
+// =========================================================================
+// glm5next (text only) — Unsloth / alternate converters
+// =========================================================================
+//
+// Some published GGUFs (notably Unsloth) use arch name "glm5next" (no hyphen)
+// and KV prefix "glm5next.*". llama.cpp uses "glm5-next" / "glm5-next.*".
+// Same tensor layout otherwise — only the arch string and KV prefix differ.
+
+bool detect_ollama_glm5next(const gguf_context * meta) {
+    const int64_t arch_kid = gguf_find_key(meta, "general.architecture");
+    if (arch_kid < 0) return false;
+    return std::strcmp(gguf_get_val_str(meta, arch_kid), "glm5next") == 0;
+}
+
+// `arch_name` is mutated to "glm5-next" so the caller's subsequent
+// LLM_KV lookups query the renamed prefix.
+void handle_glm5next(const llama_model_loader * ml, gguf_context * meta,
+                     ggml_context * ctx, std::string & arch_name) {
+    if (!detect_ollama_glm5next(meta)) return;
+    (void) ml;
+    (void) ctx;
+
+    OLLAMA_COMPAT_LOG_INFO("%s: detected Ollama-format glm5next GGUF; mapping to glm5-next\n", __func__);
+
+    gguf_set_val_str(meta, "general.architecture", "glm5-next");
+    rename_kv_prefix(meta, "glm5next.", "glm5-next.");
+    arch_name = "glm5-next";
+}
+
 // =========================================================================
 // lfm2 (text only)
 // =========================================================================
@@ -3247,6 +3277,8 @@ bool translate_metadata(const llama_model_loader * ml,
     if (arch_name == "qwen3next") handle_qwen3next(meta, ctx);
     if (arch_name == "laguna")   handle_laguna   (meta, ctx);
     if (arch_name == "gptoss")        handle_gptoss        (ml, meta, ctx, arch_name);
+    // glm5next switches arch_name to "glm5-next" — same pattern as gptoss.
+    if (arch_name == "glm5next")      handle_glm5next      (ml, meta, ctx, arch_name);
     if (arch_name == "lfm2")          handle_lfm2          (ml, meta, ctx);
     if (arch_name == "olmo3")         handle_olmo3         (meta, arch_name);
     if (arch_name == "mistral3")      handle_mistral3      (ml, meta, ctx);
