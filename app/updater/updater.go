@@ -30,7 +30,9 @@ import (
 )
 
 var (
-	UpdateCheckURLBase      = "https://ollama.com/api/update"
+	// Fork releases, not ollama.com. A release is installable when it has a
+	// zip (macOS) or exe (Windows). The in-app updater cannot install a DMG.
+	UpdateCheckURLBase      = "https://api.github.com/repos/maxkongerskov/ollama/releases/latest"
 	UpdateDownloaded        = false
 	UpdateCheckInterval     = 60 * 60 * time.Second
 	UpdateCheckInitialDelay = 3 * time.Second // 30 * time.Second
@@ -58,35 +60,37 @@ func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 		return false, updateResp
 	}
 
-	query := requestURL.Query()
-	query.Add("os", runtime.GOOS)
-	query.Add("arch", runtime.GOARCH)
 	currentVersion := version.Version
-	query.Add("version", currentVersion)
-	query.Add("ts", strconv.FormatInt(time.Now().Unix(), 10))
-
-	// The original macOS app used to use the device ID
-	// to check for updates so include it if present
-	if runtime.GOOS == "darwin" {
-		if id, err := u.Store.ID(); err == nil && id != "" {
-			query.Add("id", id)
-		}
-	}
-
+	githubRelease := requestURL.Host == "api.github.com"
 	var signature string
+	if !githubRelease {
+		query := requestURL.Query()
+		query.Add("os", runtime.GOOS)
+		query.Add("arch", runtime.GOARCH)
+		query.Add("version", currentVersion)
+		query.Add("ts", strconv.FormatInt(time.Now().Unix(), 10))
 
-	nonce, err := auth.NewNonce(rand.Reader, 16)
-	if err != nil {
-		// Don't sign if we haven't yet generated a key pair for the server
-		slog.Debug("unable to generate nonce for update check request", "error", err)
-	} else {
-		query.Add("nonce", nonce)
-		requestURL.RawQuery = query.Encode()
+		// The original macOS app used to use the device ID
+		// to check for updates so include it if present
+		if runtime.GOOS == "darwin" {
+			if id, err := u.Store.ID(); err == nil && id != "" {
+				query.Add("id", id)
+			}
+		}
 
-		data := []byte(fmt.Sprintf("%s,%s", http.MethodGet, requestURL.RequestURI()))
-		signature, err = auth.Sign(ctx, data)
+		nonce, err := auth.NewNonce(rand.Reader, 16)
 		if err != nil {
-			slog.Debug("unable to generate signature for update check request", "error", err)
+			// Don't sign if we haven't yet generated a key pair for the server
+			slog.Debug("unable to generate nonce for update check request", "error", err)
+		} else {
+			query.Add("nonce", nonce)
+			requestURL.RawQuery = query.Encode()
+
+			data := []byte(fmt.Sprintf("%s,%s", http.MethodGet, requestURL.RequestURI()))
+			signature, err = auth.Sign(ctx, data)
+			if err != nil {
+				slog.Debug("unable to generate signature for update check request", "error", err)
+			}
 		}
 	}
 
@@ -97,6 +101,9 @@ func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 	}
 	if signature != "" {
 		req.Header.Set("Authorization", signature)
+	}
+	if githubRelease {
+		req.Header.Set("Accept", "application/vnd.github+json")
 	}
 	ua := fmt.Sprintf("ollama/%s %s Go/%s %s", version.Version, runtime.GOARCH, runtime.Version(), UserAgentOS)
 	req.Header.Set("User-Agent", ua)
@@ -122,6 +129,26 @@ func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 		slog.Info(fmt.Sprintf("check update error %d - %.96s", resp.StatusCode, string(body)))
 		return false, updateResp
 	}
+	if githubRelease {
+		assetURL, tag, err := githubReleaseAsset(body)
+		if err != nil {
+			slog.Warn(fmt.Sprintf("malformed GitHub release checking for update: %s", err))
+			return false, updateResp
+		}
+		if assetURL == "" {
+			slog.Info("fork release has no zip or exe to install", "tag", tag)
+			return false, updateResp
+		}
+		if githubReleaseMatchesCurrent(tag, currentVersion) {
+			slog.Debug("fork release matches this build", "tag", tag, "version", currentVersion)
+			return false, updateResp
+		}
+		updateResp.UpdateURL = assetURL
+		updateResp.UpdateVersion = strings.TrimPrefix(tag, "v")
+		slog.Info("New update available at " + updateResp.UpdateURL)
+		return true, updateResp
+	}
+
 	err = json.Unmarshal(body, &updateResp)
 	if err != nil {
 		slog.Warn(fmt.Sprintf("malformed response checking for update: %s", err))
@@ -132,6 +159,48 @@ func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 
 	slog.Info("New update available at " + updateResp.UpdateURL)
 	return true, updateResp
+}
+
+type githubReleaseResponse struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+func githubReleaseAsset(body []byte) (string, string, error) {
+	var rel githubReleaseResponse
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return "", "", err
+	}
+	ext := ".zip"
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	var fallback string
+	for _, asset := range rel.Assets {
+		name := strings.ToLower(asset.Name)
+		if !strings.HasSuffix(name, ext) || asset.BrowserDownloadURL == "" {
+			continue
+		}
+		if strings.Contains(name, runtime.GOOS) && strings.Contains(name, runtime.GOARCH) {
+			return asset.BrowserDownloadURL, rel.TagName, nil
+		}
+		if fallback == "" {
+			fallback = asset.BrowserDownloadURL
+		}
+	}
+	return fallback, rel.TagName, nil
+}
+
+func githubReleaseMatchesCurrent(tag, current string) bool {
+	tag = strings.TrimPrefix(tag, "v")
+	current = strings.TrimPrefix(current, "v")
+	if tag == "" || current == "" {
+		return false
+	}
+	return current == tag || strings.HasPrefix(current, tag+"-")
 }
 
 func (u *Updater) DownloadNewRelease(ctx context.Context, updateResp UpdateResponse) error {
