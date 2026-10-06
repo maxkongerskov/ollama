@@ -634,7 +634,11 @@ func (p *ClaudeDesktop) routeModel(r *http.Request, models []ClaudeDesktopModel)
 }
 
 func (p *ClaudeDesktop) retryWithoutUnsupportedImages(response *http.Response, transport http.RoundTripper) (bool, error) {
-	if response.StatusCode != http.StatusBadRequest || response.Request.Method != http.MethodPost || response.Request.URL.Path != "/v1/messages" || response.Request.GetBody == nil {
+	// llama.cpp reports a missing multimodal projector as HTTP 500
+	// ("image input is not supported ... mmproj"), which Ollama's Anthropic
+	// middleware forwards as api_error. That is the same condition as a 400
+	// invalid_request_error from a text-only model: retry once without images.
+	if (response.StatusCode != http.StatusBadRequest && response.StatusCode != http.StatusInternalServerError) || response.Request.Method != http.MethodPost || response.Request.URL.Path != "/v1/messages" || response.Request.GetBody == nil {
 		return false, nil
 	}
 	if !responseRejectsImages(response) {
@@ -710,17 +714,55 @@ func responseRejectsImages(response *http.Response) bool {
 	if err != nil || len(prefix) > maxErrorBodyBytes {
 		return false
 	}
-	var responseError anthropic.ErrorResponse
-	if err := json.Unmarshal(prefix, &responseError); err != nil ||
-		responseError.Type != "error" || responseError.Error.Type != "invalid_request_error" {
-		return false
+	if response.StatusCode == http.StatusBadRequest {
+		var responseError anthropic.ErrorResponse
+		if err := json.Unmarshal(prefix, &responseError); err != nil ||
+			responseError.Type != "error" || responseError.Error.Type != "invalid_request_error" {
+			return false
+		}
+		return messageRejectsImages(responseError.Error.Message)
 	}
-	lower := strings.ToLower(responseError.Error.Message)
+	return serverErrorRejectsImages(prefix)
+}
+
+// messageRejectsImages reports whether an upstream error is specifically about
+// image input the loaded model cannot accept. It is intentionally narrow so a
+// generic 500 is not retried.
+func messageRejectsImages(message string) bool {
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "mmproj") && strings.Contains(lower, "image") {
+		return true
+	}
 	mentionsImages := strings.Contains(lower, "image") || strings.Contains(lower, "vision")
 	unsupported := strings.Contains(lower, "does not support") ||
 		strings.Contains(lower, "not support") ||
 		strings.Contains(lower, "unsupported")
 	return mentionsImages && unsupported
+}
+
+// serverErrorRejectsImages matches the Anthropic api_error envelope Ollama
+// writes for a llama.cpp 500, and the raw llama.cpp body if it is forwarded
+// unchanged. The message is often a nested JSON string.
+func serverErrorRejectsImages(body []byte) bool {
+	var anthropicError anthropic.ErrorResponse
+	if err := json.Unmarshal(body, &anthropicError); err == nil &&
+		anthropicError.Type == "error" &&
+		(anthropicError.Error.Type == "api_error" || anthropicError.Error.Type == "invalid_request_error") &&
+		messageRejectsImages(anthropicError.Error.Message) {
+		return true
+	}
+	var llamaError struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &llamaError); err == nil &&
+		llamaError.Error.Type == "server_error" &&
+		messageRejectsImages(llamaError.Error.Message) {
+		return true
+	}
+	return false
 }
 
 func setRequestBody(r *http.Request, body []byte) {

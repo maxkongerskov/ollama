@@ -3247,6 +3247,48 @@ void handle_missing_llava_projector_type(gguf_context * meta) {
     gguf_set_val_str(meta, "clip.projector_type", "mlp");
 }
 
+// Unsloth (and some pre-upstream converters) label GLM-5.3 Flash mmproj as
+// clip.projector_type=glm5next and use clip.vision.swiglu_limit instead of
+// clip.vision.swiglu_clamp. llama.cpp's clip loader only knows "glm5v"
+// (PROJECTOR_TYPE_GLM5V) and the swiglu_clamp / image_*_pixels keys.
+// Remap at mmproj load so vision works without rewriting on-disk GGUFs.
+// Matches Unsloth llama.cpp clip.cpp legacy GLM5V branch.
+void handle_glm5next_projector_type(gguf_context * meta) {
+    const int64_t kid = gguf_find_key(meta, "clip.projector_type");
+    if (kid < 0) return;
+    if (gguf_get_kv_type(meta, kid) != GGUF_TYPE_STRING) return;
+    const char * proj = gguf_get_val_str(meta, kid);
+    const bool is_glm5next = std::strcmp(proj, "glm5next") == 0;
+    const bool is_glm5v = std::strcmp(proj, "glm5v") == 0;
+    if (!is_glm5next && !is_glm5v) return;
+
+    if (is_glm5next) {
+        OLLAMA_COMPAT_LOG_INFO("%s: remapping clip.projector_type glm5next -> glm5v\n", __func__);
+        gguf_set_val_str(meta, "clip.projector_type", "glm5v");
+    }
+
+    // Legacy Unsloth key name → upstream key (required=true in clip.cpp).
+    if (!has_key(meta, "clip.vision.swiglu_clamp")) {
+        const int64_t lim = gguf_find_key(meta, "clip.vision.swiglu_limit");
+        if (lim >= 0 && gguf_get_kv_type(meta, lim) == GGUF_TYPE_FLOAT32) {
+            const float v = gguf_get_val_f32(meta, lim);
+            OLLAMA_COMPAT_LOG_INFO("%s: copying clip.vision.swiglu_limit (%g) -> clip.vision.swiglu_clamp\n", __func__, (double) v);
+            gguf_set_val_f32(meta, "clip.vision.swiglu_clamp", v);
+        }
+    }
+
+    // Unsloth legacy mmproj omits pixel-budget keys; upstream requires them.
+    // Defaults match Unsloth llama.cpp GLM5V legacy branch.
+    if (!has_key(meta, "clip.vision.image_min_pixels")) {
+        OLLAMA_COMPAT_LOG_INFO("%s: defaulting clip.vision.image_min_pixels=12544\n", __func__);
+        gguf_set_val_u32(meta, "clip.vision.image_min_pixels", 12544);
+    }
+    if (!has_key(meta, "clip.vision.image_max_pixels")) {
+        OLLAMA_COMPAT_LOG_INFO("%s: defaulting clip.vision.image_max_pixels=6272000\n", __func__);
+        gguf_set_val_u32(meta, "clip.vision.image_max_pixels", 6272000);
+    }
+}
+
 } // anonymous namespace
 
 // =========================================================================
@@ -3315,6 +3357,7 @@ void translate_clip_metadata(gguf_context * meta, ggml_context * ctx) {
     if (compat_disabled()) return;
 
     handle_missing_llava_projector_type(meta);
+    handle_glm5next_projector_type(meta);
 
     if (!any_tensor_with_prefix(ctx, "v.")) return; // nothing to translate
 

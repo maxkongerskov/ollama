@@ -1461,6 +1461,84 @@ func TestGatewayLazilyRetriesUnsupportedVision(t *testing.T) {
 	}
 }
 
+func TestGatewayRetriesLlamaCppMissingProjector(t *testing.T) {
+	llamaMessage := `{"error":{"code":500,"message":"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj","type":"server_error"}}`
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "anthropic api_error wrapper",
+			body: `{"type":"error","error":{"type":"api_error","message":"{\"error\":{\"code\":500,\"message\":\"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj\",\"type\":\"server_error\"}}"}}`,
+		},
+		{
+			name: "raw llama.cpp body",
+			body: llamaMessage,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var upstreamBodies [][]byte
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				upstreamBodies = append(upstreamBodies, body)
+				w.Header().Set("Content-Type", "application/json")
+				if len(upstreamBodies) == 1 {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, test.body)
+					return
+				}
+				_, _ = io.WriteString(w, `{"ok":true}`)
+			}))
+			defer upstream.Close()
+			p := startTestGateway(t, upstream.URL)
+
+			reqBody := `{"model":"glm-5.2:cloud","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_1","content":[{"type":"text","text":"Screenshot"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"aW1hZ2U="}}]}]}]}`
+			resp, err := http.Post("http://"+p.Addr()+"/v1/messages", "application/json", strings.NewReader(reqBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			if len(upstreamBodies) != 2 {
+				t.Fatalf("upstream calls = %d, want 2", len(upstreamBodies))
+			}
+			if strings.Contains(string(upstreamBodies[1]), `"type":"image"`) || strings.Contains(string(upstreamBodies[1]), "aW1hZ2U=") {
+				t.Fatalf("image reached fallback request: %s", upstreamBodies[1])
+			}
+			if !strings.Contains(string(upstreamBodies[1]), unsupportedImageNotice) {
+				t.Fatalf("sanitized fallback body = %s", upstreamBodies[1])
+			}
+		})
+	}
+}
+
+func TestGatewayDoesNotRetryUnrelatedServerError(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"api_error","message":"cuda out of memory"}}`)
+	}))
+	defer upstream.Close()
+	p := startTestGateway(t, upstream.URL)
+
+	body := `{"model":"glm-5.2:cloud","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}}]}]}`
+	resp, err := http.Post("http://"+p.Addr()+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError || upstreamCalls != 1 {
+		t.Fatalf("status/calls = %d/%d, want 500/1", resp.StatusCode, upstreamCalls)
+	}
+}
+
 func TestReplaceImagesInContentRejectsUnsupportedShape(t *testing.T) {
 	_, _, err := replaceImagesInContent(json.RawMessage(`{"type":"text","text":"not a content array"}`))
 	if err == nil {
