@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -61,7 +62,7 @@ func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 	}
 
 	currentVersion := version.Version
-	githubRelease := requestURL.Host == "api.github.com"
+	githubRelease := isGitHubReleaseURL(requestURL)
 	var signature string
 	if !githubRelease {
 		query := requestURL.Query()
@@ -130,17 +131,18 @@ func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 		return false, updateResp
 	}
 	if githubRelease {
-		assetURL, tag, err := githubReleaseAsset(body)
+		assetURL, rel, err := githubReleaseAsset(body)
 		if err != nil {
 			slog.Warn(fmt.Sprintf("malformed GitHub release checking for update: %s", err))
 			return false, updateResp
 		}
+		tag := rel.TagName
 		if assetURL == "" {
 			slog.Info("fork release has no zip or exe to install", "tag", tag)
 			return false, updateResp
 		}
-		if githubReleaseMatchesCurrent(tag, currentVersion) {
-			slog.Debug("fork release matches this build", "tag", tag, "version", currentVersion)
+		if !githubReleaseIsUpdate(tag, currentVersion, rel.PublishedAt, currentBuildTime()) {
+			slog.Debug("fork release is not newer than this build", "tag", tag, "version", currentVersion, "published", rel.PublishedAt)
 			return false, updateResp
 		}
 		updateResp.UpdateURL = assetURL
@@ -162,17 +164,28 @@ func (u *Updater) checkForUpdate(ctx context.Context) (bool, UpdateResponse) {
 }
 
 type githubReleaseResponse struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
+	TagName     string    `json:"tag_name"`
+	PublishedAt time.Time `json:"published_at"`
+	Assets      []struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 	} `json:"assets"`
 }
 
-func githubReleaseAsset(body []byte) (string, string, error) {
+// isGitHubReleaseURL reports whether the update check URL is a GitHub
+// "latest release" API endpoint (api.github.com, or a test server serving
+// the same .../releases/latest path).
+func isGitHubReleaseURL(u *url.URL) bool {
+	return u.Host == "api.github.com" || strings.HasSuffix(u.Path, "/releases/latest")
+}
+
+// githubReleaseAsset picks the installable asset from a fork release: a .zip
+// on macOS or an .exe on Windows. An asset naming this OS and arch wins;
+// otherwise the first asset that does not name another arch is used.
+func githubReleaseAsset(body []byte) (string, githubReleaseResponse, error) {
 	var rel githubReleaseResponse
 	if err := json.Unmarshal(body, &rel); err != nil {
-		return "", "", err
+		return "", rel, err
 	}
 	ext := ".zip"
 	if runtime.GOOS == "windows" {
@@ -184,23 +197,137 @@ func githubReleaseAsset(body []byte) (string, string, error) {
 		if !strings.HasSuffix(name, ext) || asset.BrowserDownloadURL == "" {
 			continue
 		}
-		if strings.Contains(name, runtime.GOOS) && strings.Contains(name, runtime.GOARCH) {
-			return asset.BrowserDownloadURL, rel.TagName, nil
+		if strings.Contains(name, runtime.GOOS) && assetNamesArch(name, runtime.GOARCH) {
+			return asset.BrowserDownloadURL, rel, nil
 		}
-		if fallback == "" {
+		if fallback == "" && !assetNamesOtherArch(name, runtime.GOARCH) {
 			fallback = asset.BrowserDownloadURL
 		}
 	}
-	return fallback, rel.TagName, nil
+	return fallback, rel, nil
 }
 
-func githubReleaseMatchesCurrent(tag, current string) bool {
-	tag = strings.TrimPrefix(tag, "v")
-	current = strings.TrimPrefix(current, "v")
-	if tag == "" || current == "" {
+var archAliases = map[string][]string{
+	"amd64": {"amd64", "x86_64"},
+	"arm64": {"arm64", "aarch64"},
+}
+
+func assetNamesArch(name, arch string) bool {
+	aliases, ok := archAliases[arch]
+	if !ok {
+		aliases = []string{arch}
+	}
+	for _, a := range aliases {
+		if strings.Contains(name, a) {
+			return true
+		}
+	}
+	return false
+}
+
+func assetNamesOtherArch(name, arch string) bool {
+	for other := range archAliases {
+		if other != arch && assetNamesArch(name, other) {
+			return true
+		}
+	}
+	return false
+}
+
+// currentBuildTime is when the running app binary was built or installed.
+// It orders fork releases that share a version number.
+var currentBuildTime = func() time.Time {
+	exe, err := os.Executable()
+	if err != nil {
+		return time.Time{}
+	}
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
+}
+
+// gitDescribeSuffix matches what `git describe --long --dirty` appends to the
+// tag: "-<commits>-g<sha>" and an optional "-dirty".
+var gitDescribeSuffix = regexp.MustCompile(`-[0-9]+-g[0-9a-f]+(-dirty)?$`)
+
+// forkBuildTag returns the release tag (without "v") a build was made from,
+// e.g. "0.35.1-b11325-glm5next-unload-9-g6c178a3-dirty" ->
+// "0.35.1-b11325-glm5next-unload".
+func forkBuildTag(version string) string {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if loc := gitDescribeSuffix.FindStringIndex(version); loc != nil && loc[0] > 0 {
+		return version[:loc[0]]
+	}
+	return strings.TrimSuffix(version, "-dirty")
+}
+
+var (
+	forkSemver   = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)`)
+	forkLlamaRev = regexp.MustCompile(`(?:^|-)b([0-9]+)(?:-|$)`)
+)
+
+// compareForkTags orders fork tags like "0.35.1-b11325-glm5next" by their
+// X.Y.Z version, then by the llama.cpp bNNNNN revision when both have one.
+// ok is false when either tag has no X.Y.Z version.
+func compareForkTags(a, b string) (cmp int, ok bool) {
+	am, bm := forkSemver.FindStringSubmatch(a), forkSemver.FindStringSubmatch(b)
+	if am == nil || bm == nil {
+		return 0, false
+	}
+	for i := 1; i <= 3; i++ {
+		if c := compareNumeric(am[i], bm[i]); c != 0 {
+			return c, true
+		}
+	}
+	ar, br := forkLlamaRev.FindStringSubmatch(a), forkLlamaRev.FindStringSubmatch(b)
+	if ar != nil && br != nil {
+		return compareNumeric(ar[1], br[1]), true
+	}
+	return 0, true
+}
+
+func compareNumeric(a, b string) int {
+	x, _ := strconv.ParseUint(a, 10, 64)
+	y, _ := strconv.ParseUint(b, 10, 64)
+	switch {
+	case x < y:
+		return -1
+	case x > y:
+		return 1
+	}
+	return 0
+}
+
+// githubReleaseIsUpdate reports whether the fork release tag should be
+// offered to a build reporting version current (version.Version, which is
+// `git describe` output such as "0.35.1-b11325-glm5next-unload-9-g6c178a3").
+//
+//   - A build made from the release's tag, or from commits after it, never
+//     gets that release offered again.
+//   - A release with a lower X.Y.Z or bNNNNN than the build is never offered.
+//   - A release with a higher X.Y.Z or bNNNNN is offered.
+//   - Otherwise (same numbers, different suffix such as "-glm5next" vs
+//     "-glm5next-unload"), the release is offered only if it was published
+//     after this build was installed, so a freshly built tag that is not
+//     published yet is not "updated" back to the previous release.
+func githubReleaseIsUpdate(tag, current string, publishedAt, installedAt time.Time) bool {
+	tag = strings.TrimPrefix(strings.TrimSpace(tag), "v")
+	if tag == "" {
 		return false
 	}
-	return current == tag || strings.HasPrefix(current, tag+"-")
+	base := forkBuildTag(current)
+	if base == tag {
+		return false
+	}
+	if c, ok := compareForkTags(tag, base); ok && c != 0 {
+		return c > 0
+	}
+	if !publishedAt.IsZero() && !installedAt.IsZero() && !publishedAt.After(installedAt) {
+		return false
+	}
+	return true
 }
 
 func (u *Updater) DownloadNewRelease(ctx context.Context, updateResp UpdateResponse) error {
