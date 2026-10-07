@@ -419,6 +419,7 @@ export class Settings {
     OnboardingVersion: number;
     AutoUpdateEnabled: boolean;
     ClaudeDesktopUsed: boolean;
+    CodexDesktopUsed: boolean;
 
     constructor(source: any = {}) {
         if ('string' === typeof source) source = JSON.parse(source);
@@ -441,6 +442,7 @@ export class Settings {
         this.OnboardingVersion = source["OnboardingVersion"];
         this.AutoUpdateEnabled = source["AutoUpdateEnabled"];
         this.ClaudeDesktopUsed = source["ClaudeDesktopUsed"];
+        this.CodexDesktopUsed = source["CodexDesktopUsed"];
     }
 }
 export class SettingsResponse {
