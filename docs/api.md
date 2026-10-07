@@ -55,7 +55,7 @@ Advanced parameters (optional):
 - `template`: the prompt template to use (overrides what is defined in the `Modelfile`)
 - `stream`: if `false` the response will be returned as a single response object, rather than a stream of objects
 - `raw`: if `true` no formatting will be applied to the prompt. You may choose to use the `raw` parameter if you are specifying a full templated prompt in your request to the API
-- `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `5m`)
+- `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `1h`)
 - `context` (deprecated): the context parameter returned from a previous request to `/generate`, this can be used to keep a short conversational memory
 
 #### Structured outputs
@@ -512,7 +512,7 @@ Advanced parameters (optional):
 - `format`: the format to return a response in. Format can be `json` or a JSON schema.
 - `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature`
 - `stream`: if `false` the response will be returned as a single response object, rather than a stream of objects
-- `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `5m`)
+- `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `1h`)
 
 ### Tool calling
 
@@ -1674,7 +1674,7 @@ Advanced parameters:
 
 - `truncate`: truncates the end of each input to fit within context length. Returns error if `false` and context length is exceeded. Defaults to `true`
 - `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature`
-- `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `5m`)
+- `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `1h`)
 - `dimensions`: number of dimensions for the embedding
 
 ### Examples
@@ -1793,7 +1793,7 @@ Generate embeddings from a model
 Advanced parameters:
 
 - `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature`
-- `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `5m`)
+- `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `1h`)
 
 ### Examples
 

@@ -228,7 +228,7 @@ func TestUint(t *testing.T) {
 
 func TestKeepAlive(t *testing.T) {
 	cases := map[string]time.Duration{
-		"":       5 * time.Minute,
+		"":       1 * time.Hour,
 		"1s":     time.Second,
 		"1m":     time.Minute,
 		"1h":     time.Hour,
@@ -242,11 +242,11 @@ func TestKeepAlive(t *testing.T) {
 		"-1":     time.Duration(math.MaxInt64),
 		"-1m":    time.Duration(math.MaxInt64),
 		// invalid values
-		" ":   5 * time.Minute,
-		"???": 5 * time.Minute,
-		"1d":  5 * time.Minute,
-		"1y":  5 * time.Minute,
-		"1w":  5 * time.Minute,
+		" ":   1 * time.Hour,
+		"???": 1 * time.Hour,
+		"1d":  1 * time.Hour,
+		"1y":  1 * time.Hour,
+		"1w":  1 * time.Hour,
 	}
 
 	for tt, expect := range cases {
