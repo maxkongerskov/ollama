@@ -7,13 +7,33 @@ export interface SliderProps {
   onChange?: (value: number) => void;
   className?: string;
   disabled?: boolean;
+  /**
+   * Distance (any CSS length) from each side of the slider to the first and
+   * last stop. The track runs between those two points and the stops are
+   * spread evenly along it. Sliders that share a value line up exactly, and
+   * the value should be at least half the width of the widest end label so
+   * that label does not overflow.
+   */
+  trackInset?: string;
 }
 
+const defaultTrackInset = "0.625rem";
+
 const Slider = React.forwardRef<HTMLDivElement, SliderProps>(
-  ({ label, options, value = 0, onChange, disabled = false }, ref) => {
+  (
+    {
+      label,
+      options,
+      value = 0,
+      onChange,
+      disabled = false,
+      trackInset = defaultTrackInset,
+    },
+    ref,
+  ) => {
     const [selectedValue, setSelectedValue] = React.useState(value);
     const [isDragging, setIsDragging] = React.useState(false);
-    const containerRef = React.useRef<HTMLDivElement>(null);
+    const trackRef = React.useRef<HTMLDivElement>(null);
 
     // Update internal state when value prop changes
     React.useEffect(() => {
@@ -27,14 +47,14 @@ const Slider = React.forwardRef<HTMLDivElement, SliderProps>(
     };
 
     const getClosestOption = (clientX: number) => {
-      if (!containerRef.current || !options) return null;
+      if (!trackRef.current || !options || options.length === 0) return null;
+      if (options.length === 1) return options[0].value;
 
-      const rect = containerRef.current.getBoundingClientRect();
-      const relativeX = clientX - rect.left;
-      const width = rect.width;
-      const segmentWidth = width / (options.length - 1);
+      // The track spans exactly from the first stop to the last stop.
+      const rect = trackRef.current.getBoundingClientRect();
+      const fraction = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
 
-      let closestIndex = Math.round(relativeX / segmentWidth);
+      let closestIndex = Math.round(fraction * (options.length - 1));
       closestIndex = Math.max(0, Math.min(closestIndex, options.length - 1));
 
       return options[closestIndex].value;
@@ -79,33 +99,62 @@ const Slider = React.forwardRef<HTMLDivElement, SliderProps>(
       return null;
     }
 
+    // Each stop is anchored at its position along the track and centered on
+    // it, so the dot always sits exactly over the middle of its label.
+    const stopLeft = (index: number) => {
+      const fraction = options.length > 1 ? index / (options.length - 1) : 0.5;
+      return `calc(${trackInset} + (100% - 2 * ${trackInset}) * ${fraction})`;
+    };
+
     return (
       <div className={`space-y-2 ${disabled ? "opacity-50" : ""}`} ref={ref}>
         {label && <label className="text-sm font-medium">{label}</label>}
-        <div className="relative">
-          <div className="absolute top-[9px] left-2 right-2 h-1 bg-neutral-200 dark:bg-neutral-700 pointer-events-none rounded-full" />
+        <div className="relative h-9">
+          <div
+            ref={trackRef}
+            data-slider-track=""
+            className="absolute top-[8px] h-1 bg-neutral-200 dark:bg-neutral-700 pointer-events-none rounded-full"
+            style={{ left: trackInset, right: trackInset }}
+          />
 
-          <div className="flex justify-between" ref={containerRef}>
-            {options.map((option) => (
-              <div key={option.value} className="flex flex-col items-center">
-                <button
-                  onClick={() => handleClick(option.value)}
-                  onMouseDown={handleMouseDown}
-                  disabled={disabled}
-                  className={`relative px-3 py-6 -mx-3 -my-6 z-10 ${disabled ? "cursor-not-allowed" : "cursor-pointer"}`}
+          {options.map((option, index) => (
+            <div
+              key={option.value}
+              data-slider-stop=""
+              className="absolute top-0 flex -translate-x-1/2 flex-col items-center"
+              style={{ left: stopLeft(index) }}
+            >
+              <button
+                type="button"
+                aria-label={option.label}
+                aria-pressed={selectedValue === option.value}
+                onClick={() => handleClick(option.value)}
+                onMouseDown={handleMouseDown}
+                disabled={disabled}
+                className={`relative px-3 py-6 -mx-3 -my-6 z-10 ${disabled ? "cursor-not-allowed" : "cursor-pointer"}`}
+              >
+                <div
+                  data-slider-dot=""
+                  className="relative w-5 h-5 flex items-center justify-center"
                 >
-                  <div className="relative w-5 h-5 flex items-center justify-center">
-                    {selectedValue === option.value && !disabled && (
-                      <div className="w-4 h-4 bg-white dark:bg-white border border-neutral-400 dark:border-neutral-500 rounded-full cursor-grab active:cursor-grabbing" />
-                    )}
-                  </div>
-                </button>
-                <div className="text-xs mt text-neutral-500 dark:text-neutral-400">
-                  {option.label}
+                  {/* A disabled slider still shows its position; the wrapper
+                      grays it out. */}
+                  {selectedValue === option.value && (
+                    <div
+                      data-slider-thumb=""
+                      className={`w-4 h-4 bg-white dark:bg-white border border-neutral-400 dark:border-neutral-500 rounded-full ${disabled ? "" : "cursor-grab active:cursor-grabbing"}`}
+                    />
+                  )}
                 </div>
+              </button>
+              <div
+                data-slider-label=""
+                className="whitespace-nowrap text-xs text-neutral-500 dark:text-neutral-400"
+              >
+                {option.label}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
         </div>
       </div>
     );

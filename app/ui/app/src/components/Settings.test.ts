@@ -40,6 +40,7 @@ describe("Settings defaults", () => {
       currentSettings: currentSettings({
         Expose: true,
         Models: "/custom/models",
+        KeepAlive: -1,
       }),
       currentShowAppsInMenu: false,
       cloudSource: "config",
@@ -57,6 +58,7 @@ describe("Settings defaults", () => {
       Expose: false,
       Models: "",
       ContextLength: 65_536,
+      KeepAlive: -1,
       AutoUpdateEnabled: true,
     });
     expect(onSaved).not.toHaveBeenCalled();

@@ -15,6 +15,11 @@ import { parseJsonlFromResponse } from "./util/jsonl-parsing";
 import { ollamaClient as ollama } from "./lib/ollama-client";
 import type { ModelResponse } from "ollama/browser";
 import { API_BASE, OLLAMA_DOT_COM } from "./lib/config";
+import {
+  parseNumCtx,
+  parseTrainCtx,
+  type ModelContextInfo,
+} from "./lib/settingsSliders";
 import type {
   ClaudeDesktopStatus,
   CodexDesktopModelsSettingsResult,
@@ -288,9 +293,7 @@ export async function getClaudeDesktopAvailableModels(
     const seen = new Set<string>();
     return [...localModels, ...cloudModels]
       .filter((model: ModelResponse) => {
-        const base = model.name
-          .replace(/:latest$/, "")
-          .replace(/:cloud$/, "");
+        const base = model.name.replace(/:latest$/, "").replace(/:cloud$/, "");
         if (!base || seen.has(base)) return false;
 
         const families = model.details?.families;
@@ -623,6 +626,22 @@ export async function getCloudStatus(): Promise<CloudStatusResponse | null> {
   };
 }
 
+/**
+ * The context window settings of a model (from POST /api/show): its own
+ * num_ctx parameter, if any, and its trained context length.
+ */
+export async function getModelContextInfo(
+  model: string,
+): Promise<ModelContextInfo> {
+  const response = await ollama.show({ model });
+  return {
+    numCtx: parseNumCtx(response.parameters),
+    trainCtx: parseTrainCtx(
+      response.model_info as unknown as Record<string, unknown> | undefined,
+    ),
+  };
+}
+
 /** Models currently loaded in memory (from GET /api/ps). */
 export async function listRunningModels(): Promise<ModelResponse[]> {
   const response = await ollama.ps();
@@ -641,4 +660,3 @@ export async function unloadModel(model: string): Promise<void> {
     stream: false,
   });
 }
-

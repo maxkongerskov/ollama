@@ -598,3 +598,51 @@ func TestCodexDesktopUsedMigration(t *testing.T) {
 		t.Fatal("expected existing installs to start with no inferred ChatGPT intro acknowledgment")
 	}
 }
+
+func TestKeepAliveMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "keep-alive.db")
+	db, err := newDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	settings, err := db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read settings: %v", err)
+	}
+	if settings.KeepAlive != 0 {
+		t.Fatalf("expected fresh installs to use the server default keep alive, got %d", settings.KeepAlive)
+	}
+
+	if _, err := db.conn.Exec(`
+		ALTER TABLE settings DROP COLUMN keep_alive;
+		UPDATE settings SET schema_version = 19;
+	`); err != nil {
+		t.Fatalf("failed to seed v19 settings row: %v", err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatalf("migration from v19 to v20 failed: %v", err)
+	}
+
+	settings, err = db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read migrated settings: %v", err)
+	}
+	if settings.KeepAlive != 0 {
+		t.Fatalf("expected migrated keep alive to be 0 (server default), got %d", settings.KeepAlive)
+	}
+
+	version, err := db.getSchemaVersion()
+	if err != nil {
+		t.Fatalf("failed to get schema version: %v", err)
+	}
+	if version != 20 {
+		t.Fatalf("expected schema version 20, got %d", version)
+	}
+
+	// Running the migration again must be harmless.
+	if err := db.migrateV19ToV20(); err != nil {
+		t.Fatalf("re-running v19 to v20 migration failed: %v", err)
+	}
+}

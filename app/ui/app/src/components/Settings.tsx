@@ -24,10 +24,20 @@ import {
   ArrowDownTrayIcon,
   ArrowPathIcon,
   Squares2X2Icon,
+  ClockIcon,
 } from "@heroicons/react/20/solid";
 import { Settings as SettingsType } from "@/gotypes";
 import { isWindowsPlatform } from "@/lib/platform";
 import { settingsMutationScope } from "@/lib/settingsMutationScope";
+import {
+  contextLengthOptions,
+  defaultKeepAliveSeconds,
+  formatContextLength,
+  keepAliveOptions,
+  pickActiveModel,
+  resolveDisplayedContextLength,
+  settingsSliderTrackInset,
+} from "@/lib/settingsSliders";
 import { useUser } from "@/hooks/useUser";
 import { invalidateDesktopModels } from "@/lib/desktopModels";
 import { useCloudStatus } from "@/hooks/useCloudStatus";
@@ -40,6 +50,8 @@ import {
   updateCloudSetting,
   updateSettings,
   getInferenceCompute,
+  getModelContextInfo,
+  listRunningModels,
 } from "@/api";
 
 function AnimatedDots() {
@@ -104,6 +116,7 @@ export async function applySettingsDefaults({
         Agent: false,
         Tools: false,
         ContextLength: currentSettings.ContextLength,
+        KeepAlive: currentSettings.KeepAlive,
         AutoUpdateEnabled: true,
       }),
     );
@@ -214,6 +227,40 @@ export default function Settings() {
   });
 
   const defaultContextLength = inferenceComputeResponse?.defaultContextLength;
+
+  // The Context length slider reflects the model that is actually active. If
+  // that model sets its own num_ctx, the server-wide setting cannot affect it
+  // and the slider is locked. These lookups are display-only.
+  const selectedModel = settings?.SelectedModel || "";
+  const { data: runningModels, isLoading: runningModelsLoading } = useQuery({
+    queryKey: ["runningModels"],
+    queryFn: listRunningModels,
+    enabled: !!settings,
+  });
+  const activeModel = pickActiveModel(runningModels, selectedModel);
+  const { data: activeModelInfo, isLoading: activeModelInfoLoading } = useQuery(
+    {
+      queryKey: ["modelContextInfo", activeModel?.name ?? ""],
+      queryFn: () => getModelContextInfo(activeModel!.name),
+      enabled: !!activeModel,
+      retry: false,
+    },
+  );
+  const displayedContextLength = resolveDisplayedContextLength({
+    setting: settings?.ContextLength ?? 0,
+    runningModels,
+    selectedModel,
+    activeModelInfo,
+    defaultContextLength,
+  });
+  const contextLengthLockedBy = displayedContextLength?.lockedBy;
+  // Keep the slider inert until we know whether the active model sets its own
+  // context, so a click cannot save a value that would have no effect.
+  const contextLengthDisabled =
+    !displayedContextLength ||
+    !!contextLengthLockedBy ||
+    !!runningModelsLoading ||
+    !!activeModelInfoLoading;
 
   const updateSettingsMutation = useMutation({
     scope: settingsMutationScope,
@@ -336,8 +383,11 @@ export default function Settings() {
           [field]: value,
         });
 
-        // If context length is being changed, show restart message
-        if (field === "ContextLength" && value !== settings.ContextLength) {
+        // If a server setting is being changed, show restart message
+        if (
+          (field === "ContextLength" || field === "KeepAlive") &&
+          value !== settings[field]
+        ) {
           setRestartMessage(true);
           // Hide restart message after 3 seconds
           window.setTimeout(
@@ -752,22 +802,63 @@ export default function Settings() {
                     </Description>
                     <div className="mt-3">
                       <Slider
-                        value={
-                          settings.ContextLength || defaultContextLength || 0
-                        }
+                        value={displayedContextLength?.value ?? 0}
                         onChange={(value) => {
-                          handleChange("ContextLength", value);
+                          // Never save while locked, and skip no-op saves:
+                          // changing this restarts the server, which unloads
+                          // the current model.
+                          if (
+                            !contextLengthDisabled &&
+                            value !== displayedContextLength?.value
+                          ) {
+                            handleChange("ContextLength", value);
+                          }
                         }}
-                        disabled={!defaultContextLength}
-                        options={[
-                          { value: 4096, label: "4k" },
-                          { value: 8192, label: "8k" },
-                          { value: 16384, label: "16k" },
-                          { value: 32768, label: "32k" },
-                          { value: 65536, label: "64k" },
-                          { value: 131072, label: "128k" },
-                          { value: 262144, label: "256k" },
-                        ]}
+                        disabled={contextLengthDisabled}
+                        trackInset={settingsSliderTrackInset}
+                        options={contextLengthOptions}
+                      />
+                    </div>
+                    {contextLengthLockedBy && displayedContextLength && (
+                      <p
+                        data-testid="context-length-locked-hint"
+                        className="mt-1 text-xs text-neutral-500 dark:text-neutral-400"
+                      >
+                        Set by {contextLengthLockedBy} (
+                        {formatContextLength(displayedContextLength.effective)}
+                        ). Applies to models without their own context length.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </Field>
+
+              {/* Keep Alive */}
+              <Field>
+                <div className="flex items-start space-x-3">
+                  <ClockIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
+                  <div className="w-full">
+                    <Label>Keep alive</Label>
+                    <Description>
+                      How long a model stays loaded in memory after its last
+                      request. Longer keeps responses fast; shorter frees memory
+                      sooner.
+                    </Description>
+                    <div className="mt-3">
+                      <Slider
+                        value={settings.KeepAlive || defaultKeepAliveSeconds}
+                        onChange={(value) => {
+                          // Skip no-op saves: changing this restarts the
+                          // server, which unloads the current model.
+                          if (
+                            value !==
+                            (settings.KeepAlive || defaultKeepAliveSeconds)
+                          ) {
+                            handleChange("KeepAlive", value);
+                          }
+                        }}
+                        trackInset={settingsSliderTrackInset}
+                        options={keepAliveOptions}
                       />
                     </div>
                   </div>

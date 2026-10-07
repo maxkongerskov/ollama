@@ -408,6 +408,7 @@ export class Settings {
     Tools: boolean;
     WorkingDir: string;
     ContextLength: number;
+    KeepAlive: number;
     TurboEnabled: boolean;
     WebSearchEnabled: boolean;
     ThinkEnabled: boolean;
@@ -429,6 +430,7 @@ export class Settings {
         this.Tools = source["Tools"];
         this.WorkingDir = source["WorkingDir"];
         this.ContextLength = source["ContextLength"];
+        this.KeepAlive = source["KeepAlive"];
         this.TurboEnabled = source["TurboEnabled"];
         this.WebSearchEnabled = source["WebSearchEnabled"];
         this.ThinkEnabled = source["ThinkEnabled"];

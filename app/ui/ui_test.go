@@ -1215,3 +1215,51 @@ func TestSettingsPreservesConcurrentCodexDesktopAcknowledgment(t *testing.T) {
 		t.Error("settings response returned a stale acknowledgment")
 	}
 }
+
+func TestSettingsKeepAliveChangeRestartsServer(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	restartCount := 0
+	server := &Server{Store: testStore, Restart: func() { restartCount++ }}
+
+	post := func(keepAlive int) {
+		t.Helper()
+		settings, err := testStore.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings.KeepAlive = keepAlive
+		payload, err := json.Marshal(settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(payload))
+		rr := httptest.NewRecorder()
+		if err := server.settings(rr, req); err != nil {
+			t.Fatalf("settings() error = %v", err)
+		}
+		saved, err := testStore.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.KeepAlive != keepAlive {
+			t.Fatalf("saved KeepAlive = %d, want %d", saved.KeepAlive, keepAlive)
+		}
+	}
+
+	post(-1)
+	if restartCount != 1 {
+		t.Fatalf("Restart called %d times after changing keep alive, want 1", restartCount)
+	}
+	post(-1)
+	if restartCount != 1 {
+		t.Fatalf("Restart called %d times after saving unchanged keep alive, want 1", restartCount)
+	}
+	post(14400)
+	if restartCount != 2 {
+		t.Fatalf("Restart called %d times after changing keep alive again, want 2", restartCount)
+	}
+}

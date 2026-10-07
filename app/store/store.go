@@ -150,6 +150,12 @@ type Settings struct {
 	// ContextLength specifies the context length for the ollama server (using OLLAMA_CONTEXT_LENGTH)
 	ContextLength int
 
+	// KeepAlive is the default time in seconds a model stays loaded after its
+	// last request (passed to the ollama server as OLLAMA_KEEP_ALIVE).
+	// 0 means unset (use the server default), and a negative value means the
+	// model is never unloaded.
+	KeepAlive int
+
 	// TurboEnabled indicates if Ollama Turbo features are enabled
 	TurboEnabled bool
 

@@ -263,6 +263,13 @@ func (s *Server) cmd(ctx context.Context) (*exec.Cmd, error) {
 	if settings.ContextLength > 0 {
 		env["OLLAMA_CONTEXT_LENGTH"] = strconv.Itoa(settings.ContextLength)
 	}
+	if settings.KeepAlive > 0 {
+		// Plain integers are parsed as seconds by envconfig.KeepAlive.
+		env["OLLAMA_KEEP_ALIVE"] = strconv.Itoa(settings.KeepAlive)
+	} else if settings.KeepAlive < 0 {
+		// Negative values keep models loaded indefinitely.
+		env["OLLAMA_KEEP_ALIVE"] = "-1"
+	}
 	if cloudDisabled {
 		env["OLLAMA_NO_CLOUD"] = "1"
 	} else {

@@ -33,6 +33,7 @@ func TestServerCmd(t *testing.T) {
 	os.Unsetenv("OLLAMA_HOST")
 	os.Unsetenv("OLLAMA_ORIGINS")
 	os.Unsetenv("OLLAMA_MODELS")
+	os.Unsetenv("OLLAMA_KEEP_ALIVE")
 	var defaultModels string
 	home, err := os.UserHomeDir()
 	if err == nil {
@@ -51,7 +52,19 @@ func TestServerCmd(t *testing.T) {
 			name:     "default",
 			settings: store.Settings{},
 			want:     []string{"OLLAMA_MODELS=" + defaultModels},
-			dont:     []string{"OLLAMA_HOST=", "OLLAMA_ORIGINS="},
+			dont:     []string{"OLLAMA_HOST=", "OLLAMA_ORIGINS=", "OLLAMA_KEEP_ALIVE="},
+		},
+		{
+			name:     "keep_alive",
+			settings: store.Settings{KeepAlive: 3600},
+			want:     []string{"OLLAMA_KEEP_ALIVE=3600"},
+			dont:     []string{},
+		},
+		{
+			name:     "keep_alive_never",
+			settings: store.Settings{KeepAlive: -1},
+			want:     []string{"OLLAMA_KEEP_ALIVE=-1"},
+			dont:     []string{},
 		},
 		{
 			name:     "expose",

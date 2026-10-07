@@ -3,6 +3,7 @@ import { forwardRef, useImperativeHandle } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Settings as SettingsType } from "@/gotypes";
 import { Badge } from "./ui/badge";
+import { Slider } from "./ui/slider";
 import Settings from "./Settings";
 
 const mocks = vi.hoisted(() => ({
@@ -21,6 +22,8 @@ const mocks = vi.hoisted(() => ({
     invalidateQueries: vi.fn(),
   },
   settings: null as SettingsType | null,
+  runningModels: [] as { name: string; context_length: number }[],
+  modelContextInfo: {} as { numCtx?: number; trainCtx?: number },
 }));
 
 vi.mock("@/components/ClaudeDesktopModelsSettings", () => ({
@@ -91,6 +94,12 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
         error: null,
       };
     }
+    if (queryKey[0] === "runningModels") {
+      return { data: mocks.runningModels };
+    }
+    if (queryKey[0] === "modelContextInfo") {
+      return { data: mocks.modelContextInfo };
+    }
     return { data: { defaultContextLength: 65_536 } };
   },
   useMutation: ({
@@ -141,6 +150,8 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
 vi.mock("@/api", () => ({
   getSettings: vi.fn(),
   getInferenceCompute: vi.fn(),
+  getModelContextInfo: vi.fn(),
+  listRunningModels: vi.fn(),
   updateSettings: mocks.updateSettings,
   updateCloudSetting: mocks.updateCloudSetting,
 }));
@@ -164,6 +175,8 @@ describe("Settings reset interactions", () => {
     vi.clearAllMocks();
     mocks.isWindows = false;
     mocks.settings = new SettingsType({ ContextLength: 65_536 });
+    mocks.runningModels = [];
+    mocks.modelContextInfo = {};
     mocks.updateSettings.mockResolvedValue({ settings: mocks.settings });
     mocks.updateCloudSetting.mockResolvedValue({
       disabled: false,
@@ -302,5 +315,277 @@ describe("Settings reset interactions", () => {
       });
       vi.unstubAllGlobals();
     }
+  });
+
+  describe("keep alive slider", () => {
+    function findKeepAliveSlider(renderer: ReturnType<typeof create>) {
+      const slider = renderer.root
+        .findAllByType(Slider)
+        .find((node) =>
+          node.props.options?.some(
+            (option: { label: string }) => option.label === "Never unload",
+          ),
+        );
+      if (!slider) throw new Error("Keep alive slider not found");
+      return slider;
+    }
+
+    it("renders directly under context length and defaults to 1h", async () => {
+      let renderer;
+      try {
+        await act(async () => {
+          renderer = create(<Settings />);
+          await Promise.resolve();
+        });
+
+        const sliders = renderer!.root.findAllByType(Slider);
+        const keepAlive = findKeepAliveSlider(renderer!);
+        expect(sliders.indexOf(keepAlive)).toBe(1);
+        expect(sliders[0].props.options.at(-1)).toEqual({
+          value: 1_048_576,
+          label: "1M",
+        });
+        expect(sliders[0].props.trackInset).toBe(keepAlive.props.trackInset);
+        expect(keepAlive.props.value).toBe(3600);
+        expect(
+          keepAlive.props.options.map(
+            (option: { label: string }) => option.label,
+          ),
+        ).toEqual(["5m", "15m", "1h", "4h", "24h", "Never unload"]);
+        expect(
+          keepAlive.props.options.find(
+            (option: { label: string }) => option.label === "Never unload",
+          ).value,
+        ).toBe(-1);
+      } finally {
+        await act(async () => {
+          renderer?.unmount();
+          await Promise.resolve();
+        });
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("saves the selected preset and skips no-op changes", async () => {
+      let renderer;
+      try {
+        await act(async () => {
+          renderer = create(<Settings />);
+          await Promise.resolve();
+        });
+
+        // Selecting the effective default (1h) must not save or restart.
+        await act(async () => {
+          findKeepAliveSlider(renderer!).props.onChange(3600);
+          await Promise.resolve();
+        });
+        expect(mocks.updateSettings).not.toHaveBeenCalled();
+
+        await act(async () => {
+          findKeepAliveSlider(renderer!).props.onChange(-1);
+          await Promise.resolve();
+        });
+        expect(mocks.updateSettings).toHaveBeenCalledOnce();
+        expect(mocks.updateSettings.mock.calls[0][0]).toMatchObject({
+          ContextLength: 65_536,
+          KeepAlive: -1,
+        });
+      } finally {
+        await act(async () => {
+          renderer?.unmount();
+          await Promise.resolve();
+        });
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("shows a stored value instead of the default", async () => {
+      mocks.settings = new SettingsType({
+        ContextLength: 65_536,
+        KeepAlive: 86_400,
+      });
+      let renderer;
+      try {
+        await act(async () => {
+          renderer = create(<Settings />);
+          await Promise.resolve();
+        });
+        expect(findKeepAliveSlider(renderer!).props.value).toBe(86_400);
+      } finally {
+        await act(async () => {
+          renderer?.unmount();
+          await Promise.resolve();
+        });
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
+  describe("context length slider", () => {
+    const glm = "glm5.3-flash:q6-vision";
+
+    async function renderSettings() {
+      let renderer!: ReturnType<typeof create>;
+      await act(async () => {
+        renderer = create(<Settings />);
+        await Promise.resolve();
+      });
+      return renderer;
+    }
+
+    async function cleanup(renderer?: ReturnType<typeof create>) {
+      await act(async () => {
+        renderer?.unmount();
+        await Promise.resolve();
+      });
+      vi.unstubAllGlobals();
+    }
+
+    function contextSlider(renderer: ReturnType<typeof create>) {
+      return renderer.root.findAllByType(Slider)[0];
+    }
+
+    function lockedHint(renderer: ReturnType<typeof create>) {
+      const hints = renderer.root.findAllByProps({
+        "data-testid": "context-length-locked-hint",
+      });
+      return hints.length ? textContent(hints[0]) : null;
+    }
+
+    it("shows an explicit setting when the model has no own context length", async () => {
+      mocks.runningModels = [{ name: glm, context_length: 1_048_576 }];
+      const renderer = await renderSettings();
+      try {
+        expect(contextSlider(renderer).props.value).toBe(65_536);
+        expect(contextSlider(renderer).props.disabled).toBe(false);
+        expect(lockedHint(renderer)).toBeNull();
+      } finally {
+        await cleanup(renderer);
+      }
+    });
+
+    it("stays adjustable and shows the loaded model's context when it has no num_ctx", async () => {
+      mocks.settings = new SettingsType({
+        ContextLength: 0,
+        SelectedModel: glm,
+      });
+      mocks.runningModels = [{ name: glm, context_length: 1_048_576 }];
+      const renderer = await renderSettings();
+      try {
+        expect(contextSlider(renderer).props.value).toBe(1_048_576);
+        expect(contextSlider(renderer).props.disabled).toBe(false);
+        expect(lockedHint(renderer)).toBeNull();
+      } finally {
+        await cleanup(renderer);
+      }
+    });
+
+    it("locks when the loaded model sets its own num_ctx", async () => {
+      mocks.settings = new SettingsType({
+        ContextLength: 0,
+        SelectedModel: glm,
+      });
+      mocks.runningModels = [{ name: glm, context_length: 1_048_576 }];
+      mocks.modelContextInfo = { numCtx: 1_048_576, trainCtx: 1_048_576 };
+      const renderer = await renderSettings();
+      try {
+        expect(contextSlider(renderer).props.value).toBe(1_048_576);
+        expect(contextSlider(renderer).props.disabled).toBe(true);
+        expect(lockedHint(renderer)).toBe(
+          `Set by ${glm} (1M). Applies to models without their own context length.`,
+        );
+      } finally {
+        await cleanup(renderer);
+      }
+    });
+
+    it("locks even over an explicit setting, because num_ctx wins", async () => {
+      mocks.runningModels = [{ name: glm, context_length: 1_048_576 }];
+      mocks.modelContextInfo = { numCtx: 1_048_576 };
+      const renderer = await renderSettings();
+      try {
+        expect(contextSlider(renderer).props.value).toBe(1_048_576);
+        expect(contextSlider(renderer).props.disabled).toBe(true);
+      } finally {
+        await cleanup(renderer);
+      }
+    });
+
+    it("locks for a selected model with num_ctx that is not loaded", async () => {
+      mocks.settings = new SettingsType({
+        ContextLength: 0,
+        SelectedModel: glm,
+      });
+      mocks.modelContextInfo = { numCtx: 1_048_576 };
+      const renderer = await renderSettings();
+      try {
+        expect(contextSlider(renderer).props.value).toBe(1_048_576);
+        expect(contextSlider(renderer).props.disabled).toBe(true);
+      } finally {
+        await cleanup(renderer);
+      }
+    });
+
+    it("does not save or restart on interaction while locked", async () => {
+      mocks.settings = new SettingsType({
+        ContextLength: 0,
+        SelectedModel: glm,
+      });
+      mocks.runningModels = [{ name: glm, context_length: 1_048_576 }];
+      mocks.modelContextInfo = { numCtx: 1_048_576 };
+      const renderer = await renderSettings();
+      try {
+        const slider = contextSlider(renderer);
+        // The rendered stop buttons are disabled...
+        const stopButtons = slider.findAllByType("button");
+        expect(stopButtons.length).toBe(9);
+        expect(stopButtons.every((button) => button.props.disabled)).toBe(true);
+        // ...and even a direct change is ignored.
+        await act(async () => {
+          slider.props.onChange(262_144);
+          await Promise.resolve();
+        });
+        expect(mocks.updateSettings).not.toHaveBeenCalled();
+      } finally {
+        await cleanup(renderer);
+      }
+    });
+
+    it("falls back to the server default last", async () => {
+      mocks.settings = new SettingsType({
+        ContextLength: 0,
+        SelectedModel: glm,
+      });
+      const renderer = await renderSettings();
+      try {
+        expect(contextSlider(renderer).props.value).toBe(65_536);
+        expect(contextSlider(renderer).props.disabled).toBe(false);
+      } finally {
+        await cleanup(renderer);
+      }
+    });
+
+    it("does not save when the displayed stop is clicked again", async () => {
+      mocks.settings = new SettingsType({ ContextLength: 0 });
+      mocks.runningModels = [{ name: "glm", context_length: 1_048_576 }];
+      const renderer = await renderSettings();
+      try {
+        await act(async () => {
+          contextSlider(renderer).props.onChange(1_048_576);
+          await Promise.resolve();
+        });
+        expect(mocks.updateSettings).not.toHaveBeenCalled();
+
+        await act(async () => {
+          contextSlider(renderer).props.onChange(262_144);
+          await Promise.resolve();
+        });
+        expect(mocks.updateSettings.mock.calls[0][0]).toMatchObject({
+          ContextLength: 262_144,
+        });
+      } finally {
+        await cleanup(renderer);
+      }
+    });
   });
 });

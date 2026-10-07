@@ -479,3 +479,26 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 
 	return s, cleanup
 }
+
+func TestKeepAliveRoundTrip(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	for _, keepAlive := range []int{300, 3600, 86400, -1, 0} {
+		settings, err := s.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings.KeepAlive = keepAlive
+		if err := s.SetSettings(settings); err != nil {
+			t.Fatal(err)
+		}
+		saved, err := s.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.KeepAlive != keepAlive {
+			t.Fatalf("KeepAlive = %d, want %d", saved.KeepAlive, keepAlive)
+		}
+	}
+}
