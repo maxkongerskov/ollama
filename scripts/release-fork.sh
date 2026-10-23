@@ -290,7 +290,7 @@ xcrun stapler validate dist/Ollama.app
 spctl --assess --type execute --verbose=4 dist/Ollama.app
 codesign --verify --deep --strict dist/Ollama.dmg
 xcrun stapler validate dist/Ollama.dmg
-spctl --assess --type open --verbose=4 dist/Ollama.dmg
+spctl --assess --type open --context context:primary-signature --verbose=4 dist/Ollama.dmg
 
 command -v zipinfo >/dev/null 2>&1 || die "zipinfo is required"
 BAD_ENTRIES="$(zipinfo -1 "$OUT/$BASENAME.zip" | grep -v -e '^Ollama\.app/' || true)"
